@@ -13,7 +13,16 @@ connectDB();
 
 const app = express();
 
-app.use(cors());
+// Allow the deployed frontend (CLIENT_URL) and local development
+const allowed = [process.env.CLIENT_URL, "http://localhost:5173"].filter(Boolean);
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin || allowed.includes(origin)) return cb(null, true);
+      cb(new Error("Not allowed by CORS"));
+    },
+  })
+);
 app.use(express.json());
 
 app.get("/", (req, res) => res.send("Recipe Finder API is running"));
@@ -33,4 +42,4 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
