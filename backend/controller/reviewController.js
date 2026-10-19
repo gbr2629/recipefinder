@@ -1,4 +1,5 @@
 import Review from "../models/Review.js";
+import { lookup } from "./recipeController.js";
 
 export const getReviews = async (req, res) => {
   const reviews = await Review.find({ mealId: req.params.mealId }).sort({ createdAt: -1 });
@@ -26,4 +27,20 @@ export const deleteReview = async (req, res) => {
   }
   await review.deleteOne();
   res.json({ message: "Review deleted" });
+};
+
+// Best rated recipes for the home page
+export const getTopRated = async (req, res) => {
+  const top = await Review.aggregate([
+    { $group: { _id: "$mealId", average: { $avg: "$rating" }, count: { $sum: 1 } } },
+    { $sort: { average: -1, count: -1 } },
+    { $limit: 8 },
+  ]);
+  const items = await Promise.all(
+    top.map(async (t) => {
+      const r = await lookup(t._id).catch(() => null);
+      return r ? { id: r.id, name: r.name, image: r.image, average: Math.round(t.average * 10) / 10, count: t.count } : null;
+    })
+  );
+  res.json(items.filter(Boolean));
 };

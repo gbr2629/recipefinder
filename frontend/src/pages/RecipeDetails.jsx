@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import api, { errMsg } from "../api/axios.js";
 import { useAuth } from "../context/AuthContext.jsx";
 import ReviewSection from "../components/ReviewSection.jsx";
+import "../print.css";
 
 export default function RecipeDetails() {
   const { id } = useParams();
@@ -39,13 +40,14 @@ export default function RecipeDetails() {
   return (
     <article>
       <div className="grid gap-6 md:grid-cols-2">
-        {recipe.image && <img src={recipe.image} alt={recipe.name} className="w-full rounded-xl object-cover" />}
+        {recipe.image && <img src={recipe.image} alt={recipe.name} className="no-print w-full rounded-xl object-cover" />}
         <div className="space-y-4">
           <h1 className="text-4xl font-bold">{recipe.name}</h1>
           <p className="text-muted">
             {[recipe.category, recipe.area].filter(Boolean).join(" - ")} - about {recipe.cookingTime} minutes
           </p>
-          <div className="flex flex-wrap gap-2">
+          <div className="no-print flex flex-wrap gap-2">
+            <button className="btn" onClick={() => window.print()}>Print recipe</button>
             {recipe.youtube && (
               <a className="btn btn-primary" href={recipe.youtube} target="_blank" rel="noreferrer">Watch on YouTube</a>
             )}
@@ -77,7 +79,9 @@ export default function RecipeDetails() {
         </section>
       </div>
 
-      <ReviewSection mealId={id} />
+      <div className="no-print">
+        <ReviewSection mealId={id} />
+      </div>
     </article>
   );
 }

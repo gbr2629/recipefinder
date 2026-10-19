@@ -1,0 +1,23 @@
+@media print {
+  header,
+  .no-print {
+    display: none !important;
+  }
+  html,
+  html.dark {
+    --bg: #fff;
+    --paper: #fff;
+    --card: #fff;
+    --ink: #000;
+    --muted: #333;
+    --line: #bbb;
+  }
+  body {
+    background: #fff;
+    color: #000;
+  }
+  main {
+    max-width: 100% !important;
+    padding: 0 !important;
+  }
+}

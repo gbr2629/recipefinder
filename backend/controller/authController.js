@@ -1,5 +1,7 @@
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import Favourite from "../models/Favourite.js";
+import Review from "../models/Review.js";
 
 const sign = (id) => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "7d" });
 const payload = (u) => ({ _id: u._id, name: u.name, email: u.email, role: u.role, token: sign(u._id) });
@@ -34,7 +36,13 @@ export const adminLogin = async (req, res) => {
   res.json(payload(user));
 };
 
-export const getProfile = (req, res) => res.json(req.user);
+export const getProfile = async (req, res) => {
+  const [favourites, reviews] = await Promise.all([
+    Favourite.countDocuments({ user: req.user._id }),
+    Review.countDocuments({ user: req.user._id }),
+  ]);
+  res.json({ ...req.user.toObject(), favourites, reviews });
+};
 
 export const updateProfile = async (req, res) => {
   const user = await User.findById(req.user._id);

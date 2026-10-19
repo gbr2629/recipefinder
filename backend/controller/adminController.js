@@ -5,14 +5,15 @@ import Favourite from "../models/Favourite.js";
 import Category from "../models/Category.js";
 
 export const getStats = async (req, res) => {
-  const [users, recipes, reviews, favourites, categories] = await Promise.all([
+  const [users, recipes, reviews, favourites, categories, recentUsers] = await Promise.all([
     User.countDocuments(),
     Recipe.countDocuments(),
     Review.countDocuments(),
     Favourite.countDocuments(),
     Category.countDocuments(),
+    User.find().select("-password").sort({ createdAt: -1 }).limit(5),
   ]);
-  res.json({ users, recipes, reviews, favourites, categories });
+  res.json({ users, recipes, reviews, favourites, categories, recentUsers });
 };
 
 // Users
