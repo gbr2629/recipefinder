@@ -2,13 +2,45 @@ import axios from "axios";
 import Recipe from "../models/Recipe.js";
 import Category from "../models/Category.js";
 
-const api = axios.create({ baseURL: "https://www.themealdb.com/api/json/v1/1", timeout: 10000 });
+const api = axios.create({ baseURL: "https://www.themealdb.com/api/json/v1/1", timeout: 20000 });
+
+// Retry a failed or timed-out TheMealDB request up to 2 times
+api.interceptors.response.use(undefined, async (err) => {
+  const cfg = err.config;
+  if (!cfg) return Promise.reject(err);
+  cfg._retry = (cfg._retry || 0) + 1;
+  if (cfg._retry > 2) return Promise.reject(err);
+  await new Promise((r) => setTimeout(r, 500));
+  return api(cfg);
+});
+
+// Small in-memory cache: repeated pages load fast, and if TheMealDB is down
+// we can still show the last good answer.
+const cache = new Map();
+const TTL = 60 * 60 * 1000; // 1 hour
+const cachedGet = async (url, params = {}) => {
+  const key = url + JSON.stringify(params);
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.time < TTL) return hit.data;
+  try {
+    const { data } = await api.get(url, { params });
+    cache.set(key, { data, time: Date.now() });
+    return data;
+  } catch (err) {
+    if (hit) return hit.data; // stale data is better than an error
+    throw err;
+  }
+};
+
+// Goat recipes are not shown anywhere on the site
+const HIDDEN = ["goat"];
+const isHidden = (name = "") => HIDDEN.includes(name.toLowerCase());
 
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // TheMealDB has no cooking time, so we estimate it from the length of the instructions
 const estimateTime = (text = "") => Math.min(120, Math.max(15, Math.round(text.length / 200) * 5 + 10));
 
-const normalize = (m) => {
+export const normalize = (m) => {
   const ingredients = [];
   for (let i = 1; i <= 20; i++) {
     const name = m[`strIngredient${i}`];
@@ -26,7 +58,7 @@ const normalize = (m) => {
     cookingTime: estimateTime(m.strInstructions),
   };
 };
-const brief = (m) => ({ id: m.idMeal, name: m.strMeal, image: m.strMealThumb });
+export const brief = (m) => ({ id: m.idMeal, name: m.strMeal, image: m.strMealThumb });
 const fromDb = (r) => ({
   id: `c_${r._id}`,
   name: r.name,
@@ -41,64 +73,92 @@ const fromDb = (r) => ({
 });
 const briefDb = (r) => ({ id: `c_${r._id}`, name: r.name, image: r.image, custom: true });
 
+// Exported because reviewController.js imports it
 export const lookup = async (id) => {
   if (id.startsWith("c_")) {
     const r = await Recipe.findById(id.slice(2)).catch(() => null);
     return r ? fromDb(r) : null;
   }
-  const { data } = await api.get("/lookup.php", { params: { i: id } });
+  const data = await cachedGet("/lookup.php", { i: id });
   return data.meals ? normalize(data.meals[0]) : null;
 };
 
-export const searchByName = async (req, res) => {
-  const q = (req.query.q || "").trim();
-  if (!q) return res.status(400).json({ message: "Enter a recipe name to search" });
-  const [{ data }, mine] = await Promise.all([
-    api.get("/search.php", { params: { s: q } }),
-    Recipe.find({ name: new RegExp(escapeRegex(q), "i") }),
-  ]);
-  res.json([...mine.map(briefDb), ...(data.meals || []).map(brief)]);
+// Turns a failed TheMealDB call into a clear message instead of a crash
+const safe = (fn) => async (req, res) => {
+  try {
+    await fn(req, res);
+  } catch (err) {
+    console.error(err.message);
+    res.status(502).json({ message: "Recipe service is slow right now, please try again" });
+  }
 };
 
-export const searchByIngredients = async (req, res) => {
+export const searchByName = safe(async (req, res) => {
+  const q = (req.query.q || "").trim();
+  if (!q) return res.status(400).json({ message: "Enter a recipe name to search" });
+  const [data, mine] = await Promise.all([
+    cachedGet("/search.php", { s: q }),
+    Recipe.find({ name: new RegExp(escapeRegex(q), "i"), category: { $not: /^goat$/i } }),
+  ]);
+  const meals = (data.meals || []).filter((m) => !isHidden(m.strCategory));
+  res.json([...mine.map(briefDb), ...meals.map(brief)]);
+});
+
+export const searchByIngredients = safe(async (req, res) => {
   const list = (req.query.i || "").split(",").map((s) => s.trim()).filter(Boolean);
   if (!list.length) return res.status(400).json({ message: "Enter at least one ingredient" });
 
   // TheMealDB's free API only filters by one ingredient, so we fetch each and keep recipes that match all of them
   const results = await Promise.all(
-    list.map((ing) => api.get("/filter.php", { params: { i: ing.replace(/\s+/g, "_") } }).then((r) => r.data.meals || []))
+    list.map((ing) => cachedGet("/filter.php", { i: ing.replace(/\s+/g, "_") }).then((d) => d.meals || []))
   );
   let common = results[0];
   for (const next of results.slice(1)) {
     const ids = new Set(next.map((m) => m.idMeal));
     common = common.filter((m) => ids.has(m.idMeal));
   }
-  const mine = await Recipe.find({ "ingredients.name": { $all: list.map((l) => new RegExp(escapeRegex(l), "i")) } });
+  const mine = await Recipe.find({
+    "ingredients.name": { $all: list.map((l) => new RegExp(escapeRegex(l), "i")) },
+    category: { $not: /^goat$/i },
+  });
   res.json([...mine.map(briefDb), ...common.map(brief)]);
-};
+});
 
-export const getCategories = async (req, res) => {
-  const { data } = await api.get("/categories.php");
-  const list = data.categories
-    .filter((c) => c.strCategory !== "Goat")
-    .map((c) => ({ name: c.strCategory, image: c.strCategoryThumb, description: c.strCategoryDescription }));
+// Used only if TheMealDB cannot be reached and nothing is cached yet
+const FALLBACK_CATEGORIES = [
+  "Beef", "Breakfast", "Chicken", "Dessert", "Lamb", "Miscellaneous",
+  "Pasta", "Pork", "Seafood", "Side", "Starter", "Vegan", "Vegetarian",
+];
+
+export const getCategories = safe(async (req, res) => {
+  let list;
+  try {
+    const data = await cachedGet("/categories.php");
+    list = data.categories
+      .filter((c) => !isHidden(c.strCategory))
+      .map((c) => ({ name: c.strCategory, image: c.strCategoryThumb, description: c.strCategoryDescription }));
+  } catch {
+    list = FALLBACK_CATEGORIES.map((name) => ({ name, image: "", description: "" }));
+  }
   const known = new Set(list.map((c) => c.name.toLowerCase()));
   const extra = await Category.find();
   extra.forEach((c) => {
-    if (!known.has(c.name.toLowerCase())) list.push({ name: c.name, image: "", description: c.description });
+    if (!isHidden(c.name) && !known.has(c.name.toLowerCase())) {
+      list.push({ name: c.name, image: "", description: c.description });
+    }
   });
   res.json(list);
-};
+});
 
-export const getByCategory = async (req, res) => {
+export const getByCategory = safe(async (req, res) => {
   const name = req.params.name;
-  if (name.toLowerCase() === "goat") return res.json([]);
-  const [{ data }, mine] = await Promise.all([
-    api.get("/filter.php", { params: { c: name } }),
+  if (isHidden(name)) return res.json([]);
+  const [data, mine] = await Promise.all([
+    cachedGet("/filter.php", { c: name }),
     Recipe.find({ category: new RegExp(`^${escapeRegex(name)}$`, "i") }),
   ]);
   res.json([...mine.map(briefDb), ...(data.meals || []).map(brief)]);
-};
+});
 
 // Seasons follow the Indian calendar
 const getSeason = (month) => {
@@ -135,7 +195,7 @@ const NOT_SNACK = /(soup|stew|broth|curry|chowder|casserole|roast|salad|risotto|
 
 const fetchCategories = async (cats) => {
   const results = await Promise.all(
-    cats.map((c) => api.get("/filter.php", { params: { c } }).then((r) => r.data.meals || []).catch(() => []))
+    cats.map((c) => cachedGet("/filter.php", { c }).then((d) => d.meals || []).catch(() => []))
   );
   return results.flat();
 };
@@ -153,7 +213,7 @@ const getSeasonMeals = async (season) => {
   return matched.length ? matched : all;
 };
 
-export const randomRecipe = async (req, res) => {
+export const randomRecipe = safe(async (req, res) => {
   const currentSeason = getSeason(new Date().getMonth());
   const type = (req.query.type || "").toLowerCase();
   const asked = (req.query.season || "").toLowerCase();
@@ -171,10 +231,10 @@ export const randomRecipe = async (req, res) => {
   if (!meals.length) return res.status(404).json({ message: "No recipe found, try again" });
   const recipe = await lookup(pick(meals).idMeal);
   res.json({ season, currentSeason, type: type || "season", recipe });
-};
+});
 
-export const getRecipe = async (req, res) => {
+export const getRecipe = safe(async (req, res) => {
   const recipe = await lookup(req.params.id);
   if (!recipe) return res.status(404).json({ message: "Recipe not found" });
   res.json(recipe);
-};
+});
