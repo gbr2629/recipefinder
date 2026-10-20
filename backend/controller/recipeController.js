@@ -5,7 +5,6 @@ import Category from "../models/Category.js";
 const api = axios.create({ baseURL: "https://www.themealdb.com/api/json/v1/1", timeout: 10000 });
 
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 // TheMealDB has no cooking time, so we estimate it from the length of the instructions
 const estimateTime = (text = "") => Math.min(120, Math.max(15, Math.round(text.length / 200) * 5 + 10));
 
@@ -51,62 +50,14 @@ export const lookup = async (id) => {
   return data.meals ? normalize(data.meals[0]) : null;
 };
 
-// Calls TheMealDB and always returns a list (empty list if nothing found or if the call fails)
-const fetchMeals = (url, params) =>
-  api
-    .get(url, { params })
-    .then((r) => (Array.isArray(r.data.meals) ? r.data.meals : []))
-    .catch(() => []);
-
-// Search by name, and also find related recipes (same ingredient, category or cuisine)
 export const searchByName = async (req, res) => {
   const q = (req.query.q || "").trim();
   if (!q) return res.status(400).json({ message: "Enter a recipe name to search" });
-
-  const lower = q.toLowerCase();
-  // "eggs" -> "egg", so both "egg" and "eggs" recipes are found
-  const words = [...new Set(lower.split(/\s+/).filter((w) => w.length >= 3))]
-    .slice(0, 3)
-    .map((w) => (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w));
-
-  // Each search source has a weight. Better matches get a higher score.
-  const sources = [{ weight: 50, promise: fetchMeals("/search.php", { s: q }) }];
-  for (const w of words) {
-    sources.push({ weight: 20, promise: fetchMeals("/search.php", { s: w }) });
-    sources.push({ weight: 5, promise: fetchMeals("/filter.php", { i: w.replace(/\s+/g, "_") }) });
-    sources.push({ weight: 3, promise: fetchMeals("/filter.php", { c: capitalize(w) }) });
-    sources.push({ weight: 3, promise: fetchMeals("/filter.php", { a: capitalize(w) }) });
-  }
-
-  const found = new Map();
-  const lists = await Promise.all(sources.map((s) => s.promise));
-  lists.forEach((meals, i) => {
-    for (const m of meals) {
-      const entry = found.get(m.idMeal) || { meal: m, score: 0 };
-      entry.score += sources[i].weight;
-      found.set(m.idMeal, entry);
-    }
-  });
-
-  // Bonus when the recipe name itself contains what the user typed
-  for (const entry of found.values()) {
-    const name = (entry.meal.strMeal || "").toLowerCase();
-    if (name.includes(lower)) entry.score += 30;
-    for (const w of words) if (name.includes(w)) entry.score += 10;
-  }
-
-  const meals = [...found.values()]
-    .sort((a, b) => b.score - a.score || a.meal.strMeal.localeCompare(b.meal.strMeal))
-    .slice(0, 60)
-    .map((e) => brief(e.meal));
-
-  // Recipes added by the admin
-  const checks = [q, ...words].map((t) => new RegExp(escapeRegex(t), "i"));
-  const mine = await Recipe.find({
-    $or: checks.flatMap((re) => [{ name: re }, { category: re }, { area: re }]),
-  });
-
-  res.json([...mine.map(briefDb), ...meals]);
+  const [{ data }, mine] = await Promise.all([
+    api.get("/search.php", { params: { s: q } }),
+    Recipe.find({ name: new RegExp(escapeRegex(q), "i") }),
+  ]);
+  res.json([...mine.map(briefDb), ...(data.meals || []).map(brief)]);
 };
 
 export const searchByIngredients = async (req, res) => {
@@ -115,7 +66,7 @@ export const searchByIngredients = async (req, res) => {
 
   // TheMealDB's free API only filters by one ingredient, so we fetch each and keep recipes that match all of them
   const results = await Promise.all(
-    list.map((ing) => fetchMeals("/filter.php", { i: ing.replace(/\s+/g, "_") }))
+    list.map((ing) => api.get("/filter.php", { params: { i: ing.replace(/\s+/g, "_") } }).then((r) => r.data.meals || []))
   );
   let common = results[0];
   for (const next of results.slice(1)) {
@@ -128,7 +79,9 @@ export const searchByIngredients = async (req, res) => {
 
 export const getCategories = async (req, res) => {
   const { data } = await api.get("/categories.php");
-  const list = data.categories.map((c) => ({ name: c.strCategory, image: c.strCategoryThumb, description: c.strCategoryDescription }));
+  const list = data.categories
+    .filter((c) => c.strCategory !== "Goat")
+    .map((c) => ({ name: c.strCategory, image: c.strCategoryThumb, description: c.strCategoryDescription }));
   const known = new Set(list.map((c) => c.name.toLowerCase()));
   const extra = await Category.find();
   extra.forEach((c) => {
@@ -139,11 +92,12 @@ export const getCategories = async (req, res) => {
 
 export const getByCategory = async (req, res) => {
   const name = req.params.name;
-  const [meals, mine] = await Promise.all([
-    fetchMeals("/filter.php", { c: name }),
+  if (name.toLowerCase() === "goat") return res.json([]);
+  const [{ data }, mine] = await Promise.all([
+    api.get("/filter.php", { params: { c: name } }),
     Recipe.find({ category: new RegExp(`^${escapeRegex(name)}$`, "i") }),
   ]);
-  res.json([...mine.map(briefDb), ...meals.map(brief)]);
+  res.json([...mine.map(briefDb), ...(data.meals || []).map(brief)]);
 };
 
 // Seasons follow the Indian calendar
@@ -153,25 +107,67 @@ const getSeason = (month) => {
   if (month <= 8) return "monsoon";
   return "autumn";
 };
+const SEASONS = ["winter", "summer", "monsoon", "autumn"];
 
-// Each season picks from different food categories
 const SEASON_CATEGORIES = {
-  winter: ["Beef", "Lamb", "Goat", "Pork"],
-  summer: ["Seafood", "Vegan", "Side", "Vegetarian"],
-  monsoon: ["Starter", "Breakfast", "Chicken", "Miscellaneous"],
-  autumn: ["Pasta", "Vegetarian", "Pork", "Side"],
+  winter: ["Beef", "Lamb", "Chicken", "Pork"],
+  summer: ["Seafood", "Vegetarian", "Vegan", "Starter", "Side"],
+  monsoon: ["Starter", "Chicken", "Breakfast", "Side", "Miscellaneous"],
+  autumn: ["Pasta", "Vegetarian", "Miscellaneous", "Chicken", "Seafood"],
 };
-const TYPE_CATEGORIES = { dessert: ["Dessert"], snack: ["Starter", "Side"] };
+
+// Dish-name keywords that suit each season
+const SEASON_WORDS = {
+  winter: /(soup|stew|roast|hotpot|pie|curry|casserole|chowder|braised|lamb|beef|pork|chocolate|pudding|gratin|dal|lentil|porridge)/i,
+  summer: /(salad|chilled|cold|fruit|lemon|lime|grilled|seafood|prawn|fish|ice|yogurt|cucumber|coconut|mango|smoothie|sushi)/i,
+  monsoon: /(pakora|fritter|bhaji|samosa|noodle|soup|ramen|chai|tikka|fried|fries|wings|cutlet|pancake|toast|spicy|masala|momo)/i,
+  autumn: /(pumpkin|apple|mushroom|pasta|baked|bake|squash|potato|corn|chestnut|pear|lasagne|risotto|cinnamon|fig|roasted)/i,
+};
+
+const TYPE_CATEGORIES = { dessert: ["Dessert"] };
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+// Snacks: TheMealDB has no "Snack" category, so we search several categories
+// and keep only dishes whose name looks like a snack.
+const SNACK_CATEGORIES = ["Starter", "Side", "Miscellaneous", "Breakfast", "Vegetarian", "Chicken", "Seafood"];
+const SNACK_WORDS = /(fries|wings|nacho|samosa|bruschetta|fritter|dip|guacamole|hummus|cutlet|roll|toast|sandwich|burger|bite|ball|kofta|pakora|bhaji|tikka|kebab|nugget|popcorn|tempura|croquette|cake|pancake|taco|wrap|poutine|cornbread|patty|skewer|pizza)/i;
+const NOT_SNACK = /(soup|stew|broth|curry|chowder|casserole|roast|salad|risotto|pasta|lasagne|biryani|pie|pudding)/i;
+
+const fetchCategories = async (cats) => {
+  const results = await Promise.all(
+    cats.map((c) => api.get("/filter.php", { params: { c } }).then((r) => r.data.meals || []).catch(() => []))
+  );
+  return results.flat();
+};
+
+const getSnackMeals = async () => {
+  const all = await fetchCategories(SNACK_CATEGORIES);
+  const good = all.filter((m) => SNACK_WORDS.test(m.strMeal) && !NOT_SNACK.test(m.strMeal));
+  if (good.length) return good;
+  return all.filter((m) => !NOT_SNACK.test(m.strMeal));
+};
+
+const getSeasonMeals = async (season) => {
+  const all = await fetchCategories(SEASON_CATEGORIES[season]);
+  const matched = all.filter((m) => SEASON_WORDS[season].test(m.strMeal));
+  return matched.length ? matched : all;
+};
 
 export const randomRecipe = async (req, res) => {
   const currentSeason = getSeason(new Date().getMonth());
-  const asked = (req.query.season || "").toLowerCase();
-  const season = SEASON_CATEGORIES[asked] ? asked : currentSeason; // use the season the user clicked
   const type = (req.query.type || "").toLowerCase();
-  const cats = TYPE_CATEGORIES[type] || SEASON_CATEGORIES[season];
+  const asked = (req.query.season || "").toLowerCase();
+  const season = SEASONS.includes(asked) ? asked : currentSeason;
 
-  const meals = await fetchMeals("/filter.php", { c: pick(cats) });
+  let meals;
+  if (type === "snack") {
+    meals = await getSnackMeals();
+  } else if (type === "dessert") {
+    meals = await fetchCategories(TYPE_CATEGORIES.dessert);
+  } else {
+    meals = await getSeasonMeals(season);
+  }
+
   if (!meals.length) return res.status(404).json({ message: "No recipe found, try again" });
   const recipe = await lookup(pick(meals).idMeal);
   res.json({ season, currentSeason, type: type || "season", recipe });

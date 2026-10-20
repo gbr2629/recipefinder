@@ -6,13 +6,13 @@ import RecipeCard from "../components/RecipeCard.jsx";
 const GROUPS = {
   veg: {
     title: "Vegetarian",
-    text: "Meat-free dishes, from everyday meals to desserts.",
-    categories: ["Vegetarian", "Vegan", "Dessert"],
+    text: "100% meat-free dishes: vegetarian and vegan recipes.",
+    categories: ["Vegetarian", "Vegan"],
   },
   "non-veg": {
     title: "Non-Vegetarian",
     text: "Chicken, mutton, beef, pork and seafood dishes.",
-    categories: ["Chicken", "Beef", "Lamb", "Pork", "Goat", "Seafood"],
+    categories: ["Chicken", "Beef", "Lamb", "Pork", "Seafood"],
   },
 };
 
